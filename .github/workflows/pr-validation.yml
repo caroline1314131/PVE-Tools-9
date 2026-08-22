@@ -63,7 +63,25 @@ jobs:
             echo "UPDATE 首行未包含当前版本 $VERSION_FILE_VERSION —— 更新日志已脱节，请同步 UPDATE 文件"
             exit 1
           fi
-          
+
+      - name: Installer constants consistency check
+        run: |
+          # 入口 PVE-Tools.sh 不加载 lib/config.sh，两处安装器常量需同步维护（防漂移）
+          ENTRY_BIN=$(sed -n 's/^PVE_TOOLS_INSTALL_BIN_PATH="${PVE_TOOLS_INSTALL_BIN_PATH:-\(.*\)}"$/\1/p' PVE-Tools.sh | head -1)
+          CONFIG_BIN=$(sed -n 's/^PVE_TOOLS_BIN_PATH="\(.*\)"$/\1/p' lib/config.sh | head -1)
+          ENTRY_OPT=$(sed -n 's/^PVE_TOOLS_INSTALL_OPT_DIR="${PVE_TOOLS_INSTALL_OPT_DIR:-\(.*\)}"$/\1/p' PVE-Tools.sh | head -1)
+          CONFIG_OPT=$(sed -n 's/^PVE_TOOLS_OPT_DIR="\(.*\)"$/\1/p' lib/config.sh | head -1)
+          ENTRY_MARKER=$(sed -n 's/^PVE_TOOLS_ALIAS_MARKER="\(.*\)"$/\1/p' PVE-Tools.sh | head -1)
+          CONFIG_MARKER=$(sed -n 's/^PVE_TOOLS_ALIAS_MARKER="\(.*\)"$/\1/p' lib/config.sh | head -1)
+          if [ "$ENTRY_BIN" != "$CONFIG_BIN" ] || [ "$ENTRY_OPT" != "$CONFIG_OPT" ] || [ "$ENTRY_MARKER" != "$CONFIG_MARKER" ]; then
+            echo "Installer constants drift between PVE-Tools.sh and lib/config.sh:"
+            echo "  PVE_TOOLS_INSTALL_BIN_PATH='$ENTRY_BIN' vs PVE_TOOLS_BIN_PATH='$CONFIG_BIN'"
+            echo "  PVE_TOOLS_INSTALL_OPT_DIR='$ENTRY_OPT' vs PVE_TOOLS_OPT_DIR='$CONFIG_OPT'"
+            echo "  PVE_TOOLS_ALIAS_MARKER='$ENTRY_MARKER' vs PVE_TOOLS_ALIAS_MARKER='$CONFIG_MARKER'"
+            exit 1
+          fi
+          echo "Installer constants check passed"
+
       - name: Security scan
         run: |
           # 对全量构建产物扫描真实危险模式，命中即失败

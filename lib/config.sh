@@ -263,3 +263,5 @@ PVE_CLUSTER_FIREWALL_FILE="/etc/pve/firewall/cluster.fw"
 PVE_TOOLS_BIN_PATH="/usr/local/bin/pvetools"
 PVE_TOOLS_OPT_DIR="/opt/pve-tools"
 PVE_TOOLS_ALIAS_MARKER="ALIAS"
+# 安装器元数据：记录实际安装路径（支持环境变量自定义），卸载逻辑优先读取
+PVE_TOOLS_INSTALL_META_FILE="/var/lib/pve-tools/installer.conf"

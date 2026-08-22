@@ -106,7 +106,8 @@ check_update() {
     fi
 }
 pve_tools_local_update() {
-    local current_script="${BASH_SOURCE[0]}"
+    # 用 $0 定位实际入口脚本（dist 单文件 / launcher），而非被 source 的模块文件
+    local current_script="$0"
     local resolved_script backup_dir backup_path tmp_script update_urls prefer_mirror version_url update_url script_url
     local remote_content remote_version detailed_changelog fallback_script_url downloaded_version
 
@@ -235,10 +236,25 @@ pve_tools_local_update() {
 
     display_success "本地脚本更新完成" "备份文件: $backup_path；请重新运行脚本以加载新版本。"
 }
+# 读取安装器元数据（实际安装路径）。逐行白名单解析，不使用 source/eval（dist 安全扫描约束）。
+pve_tools_load_installer_meta() {
+    local key="" value=""
+
+    [[ -r "$PVE_TOOLS_INSTALL_META_FILE" ]] || return 0
+    while IFS='=' read -r key value; do
+        case "$key" in
+            PVE_TOOLS_BIN_PATH) [[ -n "$value" ]] && PVE_TOOLS_BIN_PATH="$value" ;;
+            PVE_TOOLS_OPT_DIR)  [[ -n "$value" ]] && PVE_TOOLS_OPT_DIR="$value" ;;
+            PVE_TOOLS_RC_FILE)  [[ -n "$value" ]] && PVE_TOOLS_RC_FILE="$value" ;;
+        esac
+    done < <(grep -E '^(PVE_TOOLS_BIN_PATH|PVE_TOOLS_OPT_DIR|PVE_TOOLS_RC_FILE)=' "$PVE_TOOLS_INSTALL_META_FILE")
+}
+
 pve_tools_local_uninstall() {
     local current_script resolved_script clean_cron delete_targets=()
-    local installed_bin installed_opt_dir alias_rc_file alias_backup tmp_rc=""
-    current_script="${BASH_SOURCE[0]}"
+    local installed_bin installed_opt_dir alias_rc_file
+    # 用 $0 定位实际入口脚本（dist 单文件 / launcher），而非被 source 的模块文件
+    current_script="$0"
     resolved_script="$(readlink -f "$current_script" 2>/dev/null || realpath "$current_script" 2>/dev/null || echo "$current_script")"
 
     clear
@@ -248,13 +264,22 @@ pve_tools_local_uninstall() {
     echo -e "${YELLOW}不会删除 PVE 自身软件包、VM 磁盘或系统存储配置。${NC}"
     echo "$UI_DIVIDER"
 
+    # 安装器可能通过环境变量自定义了安装位置，元数据优先于默认常量
+    installed_bin="$PVE_TOOLS_BIN_PATH"
+    installed_opt_dir="$PVE_TOOLS_OPT_DIR"
+    # 元数据缺失时回退到 root 的 .bashrc（显式解析，与安装器默认值保持一致）
+    alias_rc_file="$(getent passwd root 2>/dev/null | cut -d: -f6)"
+    alias_rc_file="${alias_rc_file:-/root}/.bashrc"
+    pve_tools_load_installer_meta
+    if [[ -n "${PVE_TOOLS_RC_FILE:-}" ]]; then
+        alias_rc_file="$PVE_TOOLS_RC_FILE"
+    fi
+
     [[ -f "$resolved_script" ]] && delete_targets+=("$resolved_script")
     # 安装器产物联动清理：系统命令与 /opt 脚本副本目录（若当前正运行的就是它们则不重复收录）
-    installed_bin="$PVE_TOOLS_BIN_PATH"
     if [[ -f "$installed_bin" && "$installed_bin" != "$resolved_script" ]]; then
         delete_targets+=("$installed_bin")
     fi
-    installed_opt_dir="$PVE_TOOLS_OPT_DIR"
     if [[ -d "$installed_opt_dir" ]]; then
         delete_targets+=("${installed_opt_dir}/")
     fi
@@ -271,7 +296,6 @@ pve_tools_local_uninstall() {
     fi
 
     if (( ${#delete_targets[@]} == 0 )); then
-        alias_rc_file="${HOME:-/root}/.bashrc"
         if ! grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
             log_warn "未发现可删除的 PVE-Tools 本地文件。"
             return 0
@@ -282,7 +306,6 @@ pve_tools_local_uninstall() {
     if (( ${#delete_targets[@]} > 0 )); then
         printf '  - %s\n' "${delete_targets[@]}"
     fi
-    alias_rc_file="${HOME:-/root}/.bashrc"
     if grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
         echo -e "  - 别名标记块：${alias_rc_file}（# PVE-TOOLS BEGIN/END ${PVE_TOOLS_ALIAS_MARKER}）"
     fi
@@ -303,16 +326,16 @@ pve_tools_local_uninstall() {
         fi
     done
 
-    alias_rc_file="${HOME:-/root}/.bashrc"
     if grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
-        alias_backup="${alias_rc_file}.pve-tools-uninst-bak"
-        cp -a "$alias_rc_file" "$alias_backup" 2>/dev/null || true
-        if tmp_rc="$(mktemp)" \
-            && sed "/^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$/,/^# PVE-TOOLS END $PVE_TOOLS_ALIAS_MARKER\$/d" "$alias_rc_file" > "$tmp_rc" \
-            && mv -f "$tmp_rc" "$alias_rc_file"; then
-            echo -e "${GREEN}已清理别名标记块:${NC} ${alias_rc_file}（清理前备份: ${alias_backup}）"
+        # 完整性守卫：BEGIN/END 必须同时存在才按范围删除，防止不完整块误删文件尾部
+        # （remove_block 内部不校验 END 标记，守卫必须先于此复用）
+        if ! grep -q "^# PVE-TOOLS END $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
+            echo -e "${YELLOW}警告：${alias_rc_file} 中别名标记块不完整（缺 END 标记），已跳过自动清理，请手动检查该文件。${NC}"
+        elif ! backup_file "$alias_rc_file"; then
+            echo -e "${YELLOW}警告：清理前备份 ${alias_rc_file} 失败，已跳过自动清理，请手动检查该文件。${NC}"
+        elif remove_block "$alias_rc_file" "$PVE_TOOLS_ALIAS_MARKER"; then
+            echo -e "${GREEN}已清理别名标记块:${NC} ${alias_rc_file}（清理前已备份至 /var/backups/pve-tools/）"
         else
-            rm -f -- "${tmp_rc:-}" 2>/dev/null || true
             echo -e "${YELLOW}警告：清理 ${alias_rc_file} 别名标记块失败，请手动删除 # PVE-TOOLS BEGIN/END ${PVE_TOOLS_ALIAS_MARKER} 之间的内容。${NC}"
         fi
     fi

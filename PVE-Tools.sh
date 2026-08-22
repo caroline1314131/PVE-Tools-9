@@ -27,12 +27,22 @@ PVE_TOOLS_RELEASE_ASSET_URL="$PVE_TOOLS_RELEASE_BASE_URL/latest/download/PVE-Too
 PVE_TOOLS_ENTRY_LAST_ERROR=""
 
 # 安装器配置：入口脚本不加载 lib/config.sh，以下默认值须与 lib/config.sh 中
-# PVE_TOOLS_BIN_PATH / PVE_TOOLS_OPT_DIR / PVE_TOOLS_ALIAS_MARKER 保持一致。
-# 环境变量覆盖仅用于测试与自定义安装位置。
+# PVE_TOOLS_BIN_PATH / PVE_TOOLS_OPT_DIR / PVE_TOOLS_ALIAS_MARKER / PVE_TOOLS_INSTALL_META_FILE
+# 保持一致。环境变量覆盖仅用于测试与自定义安装位置。
 PVE_TOOLS_INSTALL_BIN_PATH="${PVE_TOOLS_INSTALL_BIN_PATH:-/usr/local/bin/pvetools}"
 PVE_TOOLS_INSTALL_OPT_DIR="${PVE_TOOLS_INSTALL_OPT_DIR:-/opt/pve-tools}"
-PVE_TOOLS_INSTALL_RC_FILE="${PVE_TOOLS_INSTALL_RC_FILE:-$HOME/.bashrc}"
+# root 的 home 显式解析：sudo 下 $HOME 可能指向调用用户或未设置，
+# 须与卸载端 ${HOME:-/root} 的目标保持一致，避免别名写入/清理错位
+if [[ -z "${PVE_TOOLS_INSTALL_RC_FILE:-}" ]]; then
+    PVE_TOOLS_INSTALL_RC_FILE="$(getent passwd root 2>/dev/null | cut -d: -f6)"
+    PVE_TOOLS_INSTALL_RC_FILE="${PVE_TOOLS_INSTALL_RC_FILE:-/root}/.bashrc"
+fi
+# 元数据路径固定不可覆盖：保证任意自定义安装后，不带环境变量的卸载端总能定位到它
+PVE_TOOLS_INSTALL_META_FILE="/var/lib/pve-tools/installer.conf"
 PVE_TOOLS_ALIAS_MARKER="ALIAS"
+
+# 安装成功后由 install_from 写入的实际安装路径（含别名模式），供安装后立即启动使用
+PVE_TOOLS_ENTRY_INSTALLED_PATH=""
 
 pve_tools_entry_normalize_positive_integer() {
     local variable_name="$1"
@@ -323,11 +333,20 @@ pve_tools_entry_is_full_script() {
 pve_tools_entry_require_root() {
     local action="$1"
     local self="${BASH_SOURCE[0]:-}"
-    local rerun_hint="sudo bash <(curl -sSL https://pve.u3u.icu/PVE-Tools.sh) $PVE_TOOLS_ENTRY_MODE"
+    local entry_flag=""
+    local rerun_hint="sudo bash <(curl -sSL https://pve.u3u.icu/PVE-Tools.sh)"
+
+    # 把入口模式翻译为解析器认可的 flag；run 对应默认行为（不带参数）
+    case "$PVE_TOOLS_ENTRY_MODE" in
+        install)   entry_flag="--install" ;;
+        uninstall) entry_flag="--uninstall" ;;
+        help)      entry_flag="--help" ;;
+    esac
 
     if [[ -n "$self" && -f "$self" && "$self" != /dev/fd/* ]]; then
-        rerun_hint="sudo bash $self $PVE_TOOLS_ENTRY_MODE"
+        rerun_hint="sudo bash $self"
     fi
+    [[ -n "$entry_flag" ]] && rerun_hint="$rerun_hint $entry_flag"
 
     if [[ $EUID -ne 0 ]]; then
         echo "错误：$action 需要 root 权限，未对系统做任何更改。" >&2
@@ -340,11 +359,16 @@ pve_tools_entry_require_root() {
 pve_tools_entry_write_alias_block() {
     local target_script="$1"
     local rc_file="$PVE_TOOLS_INSTALL_RC_FILE"
-    local rc_dir rc_backup
+    local rc_dir rc_backup tmp_rc=""
+    local has_begin=0 has_end=0
 
     rc_dir="$(dirname "$rc_file")"
     if ! mkdir -p "$rc_dir"; then
         PVE_TOOLS_ENTRY_LAST_ERROR="无法创建配置目录：$rc_dir"
+        return 1
+    fi
+    if [[ -e "$rc_file" && ! -f "$rc_file" ]]; then
+        PVE_TOOLS_ENTRY_LAST_ERROR="别名配置路径不是普通文件：$rc_file"
         return 1
     fi
 
@@ -354,31 +378,68 @@ pve_tools_entry_write_alias_block() {
         cp -a "$rc_file" "$rc_backup" 2>/dev/null || true
     fi
 
-    # 幂等：已有标记块则先整段移除再重写，保证别名指向最新安装位置
-    if grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$rc_file" 2>/dev/null; then
-        if ! pve_tools_entry_remove_alias_block "$rc_file"; then
-            return 1
-        fi
+    # 完整性前置校验：BEGIN 与 END 必须同时存在才允许自动改写，
+    # 避免用户手改导致的不完整标记块被 sed 范围删除波及到文件尾
+    grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$rc_file" 2>/dev/null && has_begin=1
+    grep -q "^# PVE-TOOLS END $PVE_TOOLS_ALIAS_MARKER\$" "$rc_file" 2>/dev/null && has_end=1
+    if [[ "$has_begin" -ne "$has_end" ]]; then
+        PVE_TOOLS_ENTRY_LAST_ERROR="$rc_file 中别名标记块不完整（缺 $([[ "$has_begin" -eq 1 ]] && echo "END" || echo "BEGIN") 标记），已拒绝自动改写，请手动检查该文件"
+        return 1
     fi
 
+    # 幂等且原子：先在临时文件中生成「原内容去掉旧标记块 + 新标记块」，再整体替换，
+    # 任一步失败都不会破坏现有 RC 文件
+    tmp_rc="$(mktemp "${rc_file}.XXXXXX")" || {
+        PVE_TOOLS_ENTRY_LAST_ERROR="无法创建临时文件以更新别名配置"
+        return 1
+    }
+    if [[ "$has_begin" -eq 1 ]]; then
+        if ! sed "/^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$/,/^# PVE-TOOLS END $PVE_TOOLS_ALIAS_MARKER\$/d" "$rc_file" > "$tmp_rc"; then
+            rm -f -- "$tmp_rc"
+            PVE_TOOLS_ENTRY_LAST_ERROR="读取别名配置失败：$rc_file"
+            return 1
+        fi
+    elif [[ -f "$rc_file" ]]; then
+        cat -- "$rc_file" > "$tmp_rc" || {
+            rm -f -- "$tmp_rc"
+            PVE_TOOLS_ENTRY_LAST_ERROR="无法读取别名配置：$rc_file"
+            return 1
+        }
+    fi
     {
         echo ""
         echo "# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER"
         echo "alias pvetools='$target_script'"
         echo "# PVE-TOOLS END $PVE_TOOLS_ALIAS_MARKER"
-    } >> "$rc_file" || {
-        PVE_TOOLS_ENTRY_LAST_ERROR="无法写入别名配置：$rc_file"
+    } >> "$tmp_rc" || {
+        rm -f -- "$tmp_rc"
+        PVE_TOOLS_ENTRY_LAST_ERROR="无法写入别名配置临时文件"
         return 1
     }
+
+    if ! mv -f "$tmp_rc" "$rc_file"; then
+        rm -f -- "$tmp_rc"
+        PVE_TOOLS_ENTRY_LAST_ERROR="无法替换别名配置：$rc_file"
+        return 1
+    fi
 }
 
 pve_tools_entry_remove_alias_block() {
     local rc_file="${1:-$PVE_TOOLS_INSTALL_RC_FILE}"
     local tmp_rc=""
+    local has_begin=0 has_end=0
 
     [[ -f "$rc_file" ]] || return 0
-    if ! grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$rc_file"; then
+    grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$rc_file" 2>/dev/null && has_begin=1
+    grep -q "^# PVE-TOOLS END $PVE_TOOLS_ALIAS_MARKER\$" "$rc_file" 2>/dev/null && has_end=1
+
+    # 无标记块：无事可做；只有单边标记：视为不完整块，拒绝按范围删除以免误删文件尾部内容
+    if [[ "$has_begin" -eq 0 && "$has_end" -eq 0 ]]; then
         return 0
+    fi
+    if [[ "$has_begin" -ne "$has_end" ]]; then
+        PVE_TOOLS_ENTRY_LAST_ERROR="$rc_file 中别名标记块不完整（缺 $([[ "$has_begin" -eq 1 ]] && echo "END" || echo "BEGIN") 标记），已拒绝自动清理，请手动检查该文件"
+        return 1
     fi
 
     tmp_rc="$(mktemp "${rc_file}.XXXXXX")" || {
@@ -395,11 +456,47 @@ pve_tools_entry_remove_alias_block() {
     return 1
 }
 
-# 覆盖旧版本前备份到 /var/backups/pve-tools/，与主程序 backup 约定保持一致
+# 安装成功后持久化实际安装路径，供卸载逻辑（入口 --uninstall 与主程序卸载）在
+# 未携带安装时环境变量的场景下也能定位自定义位置。
+# 读取端使用白名单逐行解析而非 source：dist 内禁止出现 source/eval。
+pve_tools_entry_write_install_meta() {
+    local meta_dir=""
+
+    meta_dir="$(dirname "$PVE_TOOLS_INSTALL_META_FILE")"
+    if ! mkdir -p "$meta_dir"; then
+        PVE_TOOLS_ENTRY_LAST_ERROR="无法创建元数据目录：$meta_dir"
+        return 1
+    fi
+    {
+        echo "# PVE-Tools 安装器元数据（自动生成，供卸载逻辑读取实际安装路径）"
+        echo "PVE_TOOLS_BIN_PATH=$PVE_TOOLS_INSTALL_BIN_PATH"
+        echo "PVE_TOOLS_OPT_DIR=$PVE_TOOLS_INSTALL_OPT_DIR"
+        echo "PVE_TOOLS_RC_FILE=$PVE_TOOLS_INSTALL_RC_FILE"
+    } > "$PVE_TOOLS_INSTALL_META_FILE" || {
+        PVE_TOOLS_ENTRY_LAST_ERROR="无法写入安装元数据：$PVE_TOOLS_INSTALL_META_FILE"
+        return 1
+    }
+}
+
+pve_tools_entry_load_install_meta() {
+    local key="" value=""
+
+    [[ -r "$PVE_TOOLS_INSTALL_META_FILE" ]] || return 0
+    while IFS='=' read -r key value; do
+        case "$key" in
+            PVE_TOOLS_BIN_PATH) [[ -n "$value" ]] && PVE_TOOLS_INSTALL_BIN_PATH="$value" ;;
+            PVE_TOOLS_OPT_DIR)  [[ -n "$value" ]] && PVE_TOOLS_INSTALL_OPT_DIR="$value" ;;
+            PVE_TOOLS_RC_FILE)  [[ -n "$value" ]] && PVE_TOOLS_INSTALL_RC_FILE="$value" ;;
+        esac
+    done < <(grep -E '^(PVE_TOOLS_BIN_PATH|PVE_TOOLS_OPT_DIR|PVE_TOOLS_RC_FILE)=' "$PVE_TOOLS_INSTALL_META_FILE")
+}
+
+# 覆盖旧版本前备份到 /var/backups/pve-tools/，与主程序 backup 约定保持一致。
+# 按目标 basename 派生备份名，bin（pvetools）与 alias（PVE-Tools.sh）模式备份互不覆盖。
 pve_tools_entry_backup_existing() {
     local target="$1"
     local backup_dir="/var/backups/pve-tools"
-    local backup_path="${backup_dir}/pvetools.bin.bak"
+    local backup_path="${backup_dir}/$(basename "$target").bak"
 
     [[ -f "$target" ]] || return 0
     mkdir -p "$backup_dir" || return 1
@@ -453,6 +550,7 @@ pve_tools_entry_install_from() {
     local target=""
     local old_version="" new_version=""
     local answer=""
+    local rc_snapshot="" rc_existed=0
 
     if ! pve_tools_entry_validate_script "$source_file"; then
         PVE_TOOLS_ENTRY_LAST_ERROR="待安装内容不是有效的完整版主程序：${PVE_TOOLS_ENTRY_LAST_ERROR:-未知原因}"
@@ -506,13 +604,43 @@ pve_tools_entry_install_from() {
         return 1
     fi
 
-    if ! pve_tools_entry_place_file "$source_file" "$target"; then
-        return 1
+    # 别名模式采用事务顺序：先原子更新 RC 别名块（此时旧脚本未动，失败即安全中止），
+    # 再替换脚本；替换失败则从快照恢复 RC，旧脚本因 mv 原子性天然无损。
+    if [[ "$mode" == "alias" ]]; then
+        [[ -f "$PVE_TOOLS_INSTALL_RC_FILE" ]] && rc_existed=1
+        rc_snapshot="$(mktemp)" || {
+            PVE_TOOLS_ENTRY_LAST_ERROR="无法创建 RC 快照临时文件"
+            return 1
+        }
+        if [[ "$rc_existed" -eq 1 ]] && ! cp -a "$PVE_TOOLS_INSTALL_RC_FILE" "$rc_snapshot"; then
+            rm -f -- "$rc_snapshot"
+            PVE_TOOLS_ENTRY_LAST_ERROR="无法快照 RC 文件：$PVE_TOOLS_INSTALL_RC_FILE"
+            return 1
+        fi
+        if ! pve_tools_entry_write_alias_block "$target"; then
+            rm -f -- "$rc_snapshot"
+            return 1
+        fi
     fi
 
-    if [[ "$mode" == "alias" ]] && ! pve_tools_entry_write_alias_block "$target"; then
-        rm -f -- "$target"
+    if ! pve_tools_entry_place_file "$source_file" "$target"; then
+        if [[ "$mode" == "alias" ]]; then
+            if [[ "$rc_existed" -eq 1 ]]; then
+                cp -a "$rc_snapshot" "$PVE_TOOLS_INSTALL_RC_FILE" 2>/dev/null || true
+            else
+                pve_tools_entry_remove_alias_block "$PVE_TOOLS_INSTALL_RC_FILE" 2>/dev/null || true
+            fi
+        fi
+        rm -f -- "$rc_snapshot"
         return 1
+    fi
+    rm -f -- "$rc_snapshot"
+
+    PVE_TOOLS_ENTRY_INSTALLED_PATH="$target"
+
+    # 元数据写入失败不阻断安装，但需提示自定义路径场景的卸载影响
+    if ! pve_tools_entry_write_install_meta; then
+        echo "警告：安装元数据写入失败（$PVE_TOOLS_ENTRY_LAST_ERROR），自定义路径下卸载时可能需要重新指定环境变量。" >&2
     fi
 
     echo "安装完成：pvetools (v$new_version)"
@@ -527,22 +655,28 @@ pve_tools_entry_install_from() {
 }
 
 pve_tools_entry_uninstall_system() {
-    local bin_path="$PVE_TOOLS_INSTALL_BIN_PATH"
-    local opt_dir="$PVE_TOOLS_INSTALL_OPT_DIR"
-    local rc_file="$PVE_TOOLS_INSTALL_RC_FILE"
+    local bin_path="" opt_dir="" rc_file=""
     local has_bin=0 has_opt=0 has_alias=0 found=0
     local answer=""
+    local failures=0
 
     if ! pve_tools_entry_require_root "卸载 pvetools"; then
         return 1
     fi
+
+    # 优先读取安装时持久化的实际路径，环境变量覆盖仍具有最高优先级
+    pve_tools_entry_load_install_meta
+    bin_path="$PVE_TOOLS_INSTALL_BIN_PATH"
+    opt_dir="$PVE_TOOLS_INSTALL_OPT_DIR"
+    rc_file="$PVE_TOOLS_INSTALL_RC_FILE"
 
     if pve_tools_entry_is_full_script "$bin_path"; then
         has_bin=1; found=1
     elif [[ -e "$bin_path" ]]; then
         echo "警告：$bin_path 存在但不是 PVE-Tools 完整版，跳过删除。" >&2
     fi
-    if [[ -d "$opt_dir" ]]; then
+    # 目录须包含本工具安装的完整脚本才纳入删除清单，避免自定义路径误指向其他目录时被 rm -rf
+    if [[ -d "$opt_dir" ]] && pve_tools_entry_is_full_script "$opt_dir/PVE-Tools.sh"; then
         has_opt=1; found=1
     fi
     if grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$rc_file" 2>/dev/null; then
@@ -568,13 +702,42 @@ pve_tools_entry_uninstall_system() {
     fi
 
     if [[ "$has_bin" -eq 1 ]]; then
-        rm -f -- "$bin_path" && echo "已删除：$bin_path"
+        if rm -f -- "$bin_path"; then
+            echo "已删除：$bin_path"
+        else
+            echo "错误：删除失败：$bin_path" >&2
+            failures=1
+        fi
     fi
     if [[ "$has_opt" -eq 1 ]]; then
-        rm -rf -- "${opt_dir%/}" && echo "已删除：${opt_dir%/}/"
+        if rm -rf -- "${opt_dir%/}"; then
+            echo "已删除：${opt_dir%/}/"
+        else
+            echo "错误：目录删除失败：${opt_dir%/}/" >&2
+            failures=1
+        fi
     fi
-    if [[ "$has_alias" -eq 1 ]] && pve_tools_entry_remove_alias_block "$rc_file"; then
-        echo "已清理：$rc_file 中的别名标记块"
+    if [[ "$has_alias" -eq 1 ]]; then
+        if pve_tools_entry_remove_alias_block "$rc_file"; then
+            echo "已清理：$rc_file 中的别名标记块"
+        else
+            echo "错误：$PVE_TOOLS_ENTRY_LAST_ERROR" >&2
+            failures=1
+        fi
+    fi
+
+    if [[ -f "$PVE_TOOLS_INSTALL_META_FILE" ]]; then
+        if rm -f -- "$PVE_TOOLS_INSTALL_META_FILE"; then
+            echo "已清理安装元数据：$PVE_TOOLS_INSTALL_META_FILE"
+        else
+            echo "错误：无法删除安装元数据：$PVE_TOOLS_INSTALL_META_FILE" >&2
+            failures=1
+        fi
+    fi
+
+    if [[ "$failures" -ne 0 ]]; then
+        echo "卸载未完全完成，请根据上方错误信息手动处理残留项。" >&2
+        return 1
     fi
     echo "卸载完成。"
 }
@@ -622,7 +785,7 @@ pve_tools_entry_maybe_offer_install() {
         2)
             if pve_tools_entry_install_from "$downloaded_file" ""; then
                 echo
-                pve_tools_entry_launch_installed "$PVE_TOOLS_INSTALL_BIN_PATH" "$@"
+                pve_tools_entry_launch_installed "${PVE_TOOLS_ENTRY_INSTALLED_PATH:-$PVE_TOOLS_INSTALL_BIN_PATH}" "$@"
                 exit $?
             fi
             if [[ "$PVE_TOOLS_ENTRY_LAST_ERROR" != "用户取消安装" && "$PVE_TOOLS_ENTRY_LAST_ERROR" != "缺少 root 权限" ]]; then
@@ -716,7 +879,7 @@ else
             echo "主程序校验通过，正在安装 pvetools..."
             if pve_tools_entry_install_from "$downloaded_file" "bin"; then
                 echo
-                bash "$PVE_TOOLS_INSTALL_BIN_PATH" "${PVE_TOOLS_ENTRY_ARGS[@]}"
+                bash "${PVE_TOOLS_ENTRY_INSTALLED_PATH:-$PVE_TOOLS_INSTALL_BIN_PATH}" "${PVE_TOOLS_ENTRY_ARGS[@]}"
                 exit $?
             fi
             echo "错误：$PVE_TOOLS_ENTRY_LAST_ERROR" >&2
