@@ -16,11 +16,12 @@
 
 ## 文件清单
 
-### config.sh -- 全局变量与常量（约 259 行，无函数）
+### config.sh -- 全局变量与常量（约 265 行，无函数）
 
 | 类别 | 变量 | 说明 |
 |---|---|---|
 | 版本信息 | `CURRENT_VERSION`, `BUILD_NICKNAME`, `VERSION_FILE_URL`, `UPDATE_FILE_URL`, `PVE_TOOLS_SCRIPT_URL` | 版本号与更新 URL（脚本更新指向 GitHub Releases latest） |
+| 安装器路径约定 | `PVE_TOOLS_BIN_PATH`, `PVE_TOOLS_OPT_DIR`, `PVE_TOOLS_ALIAS_MARKER` | pvetools 系统命令路径、/opt 脚本目录、别名标记名（入口 PVE-Tools.sh 不加载本文件，两处常量需同步维护） |
 | 镜像源注册表 | `MIRROR_NAMES[]`, `MIRROR_IDS[]`, `MIRROR_DEBIAN_URIS[]`, `MIRROR_SECURITY_URIS[]`, `MIRROR_PVE_URIS[]`, `MIRROR_CEPH_URIS[]`, `MIRROR_CT_URIS[]` | 24 个镜像源并行数组 |
 | 镜像选择状态 | `MIRROR_SELECTED_*` | 当前选中的镜像索引（-1 未选） |
 | 网络检测 | `CF_TRACE_URL`, `GITHUB_MIRROR_PREFIX`, `USER_COUNTRY_CODE`, `NETWORK_MODE`, `IS_OFFLINE_MODE`, `USE_MIRROR_FOR_UPDATE` | Cloudflare 地区检测、镜像加速 |
@@ -79,6 +80,7 @@
 
 | 函数 | 说明 |
 |---|---|
+| `pve_tools_dispatch_entry_flags()` | 安装为系统命令后的旗标分发：`--uninstall`（root 检查后走本地卸载）、`--help/-h`、`--version` 短路处理；`--install` 仅提示；其余参数透传 |
 | `check_root()` | root 权限检查 |
 | `check_debug_mode()` | 解析 `--i-know-what-i-do` 和 `--debug` 参数 |
 | `check_pve_version()` | PVE 版本检测（非 PVE9 环境需确认风险，拦截高危自动化） |

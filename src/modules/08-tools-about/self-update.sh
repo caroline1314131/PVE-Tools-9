@@ -237,16 +237,27 @@ pve_tools_local_update() {
 }
 pve_tools_local_uninstall() {
     local current_script resolved_script clean_cron delete_targets=()
+    local installed_bin installed_opt_dir alias_rc_file alias_backup tmp_rc=""
     current_script="${BASH_SOURCE[0]}"
     resolved_script="$(readlink -f "$current_script" 2>/dev/null || realpath "$current_script" 2>/dev/null || echo "$current_script")"
 
     clear
     show_menu_header "本地脚本快捷卸载"
     echo -e "${RED}将删除 PVE-Tools 本地脚本及脚本产生的日志/备份/导出目录。${NC}"
+    echo -e "${YELLOW}同时会清理安装器写入的系统命令 pvetools、/opt 脚本副本与 shell 别名标记块。${NC}"
     echo -e "${YELLOW}不会删除 PVE 自身软件包、VM 磁盘或系统存储配置。${NC}"
     echo "$UI_DIVIDER"
 
     [[ -f "$resolved_script" ]] && delete_targets+=("$resolved_script")
+    # 安装器产物联动清理：系统命令与 /opt 脚本副本目录（若当前正运行的就是它们则不重复收录）
+    installed_bin="$PVE_TOOLS_BIN_PATH"
+    if [[ -f "$installed_bin" && "$installed_bin" != "$resolved_script" ]]; then
+        delete_targets+=("$installed_bin")
+    fi
+    installed_opt_dir="$PVE_TOOLS_OPT_DIR"
+    if [[ -d "$installed_opt_dir" ]]; then
+        delete_targets+=("${installed_opt_dir}/")
+    fi
     [[ -f "/var/log/pve-tools.log" ]] && delete_targets+=("/var/log/pve-tools.log")
     [[ -d "/var/backups/pve-tools" ]] && delete_targets+=("/var/backups/pve-tools/")
     [[ -d "/var/lib/pve-tools" ]] && delete_targets+=("/var/lib/pve-tools/")
@@ -260,12 +271,21 @@ pve_tools_local_uninstall() {
     fi
 
     if (( ${#delete_targets[@]} == 0 )); then
-        log_warn "未发现可删除的 PVE-Tools 本地文件。"
-        return 0
+        alias_rc_file="${HOME:-/root}/.bashrc"
+        if ! grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
+            log_warn "未发现可删除的 PVE-Tools 本地文件。"
+            return 0
+        fi
     fi
 
     echo -e "${CYAN}将删除以下文件/目录:${NC}"
-    printf '  - %s\n' "${delete_targets[@]}"
+    if (( ${#delete_targets[@]} > 0 )); then
+        printf '  - %s\n' "${delete_targets[@]}"
+    fi
+    alias_rc_file="${HOME:-/root}/.bashrc"
+    if grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
+        echo -e "  - 别名标记块：${alias_rc_file}（# PVE-TOOLS BEGIN/END ${PVE_TOOLS_ALIAS_MARKER}）"
+    fi
     echo "$UI_DIVIDER"
 
     if ! confirm_high_risk_action "卸载 PVE-Tools 本地脚本及关联文件" "会永久删除上方列出的脚本、日志、备份和导出目录。" "误删备份目录会丢失脚本自动备份的历史配置副本；删除 cron 会停止后续定时备份。" "请确认已经导出仍需保留的备份/配置文件，并确认删除清单只包含 PVE-Tools 文件。" "UNINSTALL"; then
@@ -282,6 +302,20 @@ pve_tools_local_uninstall() {
             echo -e "${GREEN}已删除文件:${NC} $target"
         fi
     done
+
+    alias_rc_file="${HOME:-/root}/.bashrc"
+    if grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
+        alias_backup="${alias_rc_file}.pve-tools-uninst-bak"
+        cp -a "$alias_rc_file" "$alias_backup" 2>/dev/null || true
+        if tmp_rc="$(mktemp)" \
+            && sed "/^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$/,/^# PVE-TOOLS END $PVE_TOOLS_ALIAS_MARKER\$/d" "$alias_rc_file" > "$tmp_rc" \
+            && mv -f "$tmp_rc" "$alias_rc_file"; then
+            echo -e "${GREEN}已清理别名标记块:${NC} ${alias_rc_file}（清理前备份: ${alias_backup}）"
+        else
+            rm -f -- "${tmp_rc:-}" 2>/dev/null || true
+            echo -e "${YELLOW}警告：清理 ${alias_rc_file} 别名标记块失败，请手动删除 # PVE-TOOLS BEGIN/END ${PVE_TOOLS_ALIAS_MARKER} 之间的内容。${NC}"
+        fi
+    fi
 
     if [[ "$clean_cron" == "yes" || "$clean_cron" == "YES" ]]; then
         systemctl restart cron 2>/dev/null || service cron restart 2>/dev/null || true

@@ -1,3 +1,8 @@
+v11.2.0
+- 入口脚本升级为「启动器 + 可选安装器」：远程运行下载完成后可一键安装为系统命令 pvetools（/usr/local/bin 直装或 /opt + 别名两种方式），不带参数时行为不变
+- 新增 --install / --uninstall / --help 非交互参数，支持环境变量自定义安装路径；安装后的 pvetools 命令原生支持 --uninstall / --version / --help
+- 菜单 8 本地脚本快捷卸载联动清理安装器产物：系统命令、/opt/pve-tools 目录与 .bashrc 别名标记块
+
 v11.1.0
 - 新增「获取帮助」板块（主菜单 11）：QQ 水群 / Telegram 聊天社区 / 作者付费咨询与赞助入口
 - 硬件直通一键配置 (IOMMU) 新增可选增强参数：iommu=pt 与 pcie_acs_override=downstream,multifunction（强制拆分 IOMMU 组，解决 GPU 与系统盘同组时 vfio-pci 误接管系统盘问题）

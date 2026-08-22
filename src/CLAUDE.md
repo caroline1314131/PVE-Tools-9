@@ -178,7 +178,7 @@
 |---|---|---|
 | `init.sh` | `menu_tools_about()`, `show_menu_rescue()` | 二级菜单 + 救砖工具箱 |
 | `sysinfo.sh` | `show_system_info()` | 系统信息概览 |
-| `self-update.sh` | `check_update()`, `pve_tools_local_update()`, `pve_tools_local_uninstall()` | 本地脚本更新/卸载 |
+| `self-update.sh` | `check_update()`, `pve_tools_local_update()`, `pve_tools_local_uninstall()` | 本地脚本更新/卸载（卸载联动清理安装器产物：`PVE_TOOLS_BIN_PATH` 命令、`PVE_TOOLS_OPT_DIR` 目录、`.bashrc` 别名标记块） |
 
 **依赖**: 仅依赖 `lib/`。
 

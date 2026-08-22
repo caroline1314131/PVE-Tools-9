@@ -146,11 +146,48 @@ show_menu() {
     echo
     echo -ne "  ${PRIMARY}请输入您的选择 [0-11]: ${NC}"
 }
+# 安装为系统命令（pvetools）后的命令行旗标分发。
+# dist 完整版不经过入口 PVE-Tools.sh 的参数预解析，--uninstall/--help/--version 必须在此处理；
+# 其余未知参数保持原有行为（透传给 check_debug_mode 与主菜单）。
+pve_tools_dispatch_entry_flags() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            -h|--help)
+                cat <<'EOF'
+用法: pvetools [选项]
+
+不带选项运行进入交互式主菜单。
+
+选项:
+  --uninstall   卸载本脚本及脚本产生的日志/备份/导出目录，并清理安装器写入的系统命令与别名
+  --version     显示当前版本
+  -h, --help    显示本帮助
+EOF
+                exit 0
+                ;;
+            --version)
+                echo "PVE-Tools Pro v${CURRENT_VERSION} (${BUILD_NICKNAME})"
+                exit 0
+                ;;
+            --install)
+                log_info "当前已是本地安装版本；重新安装请在远程安装命令 bash <(curl -sSL https://pve.u3u.icu/PVE-Tools.sh) 后追加 --install 参数。"
+                ;;
+            --uninstall)
+                check_root
+                pve_tools_local_uninstall
+                exit $?
+                ;;
+        esac
+    done
+}
+
 # 应急救砖工具箱菜单
 main() {
     # Ctrl+C 不再整体杀死脚本：中断当前输入后回到菜单流转，连续按可逐层返回
     trap 'echo' INT
 
+    pve_tools_dispatch_entry_flags "$@"
     check_root
     ensure_legal_acceptance
     check_debug_mode "$@"
