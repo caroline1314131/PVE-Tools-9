@@ -255,6 +255,7 @@ pve_tools_local_uninstall() {
     local deferred_targets=()
     local installed_bin installed_opt_dir alias_rc_file
     local cleanup_failed=0
+    local has_begin=0 has_end=0
     # 用 $0 定位实际入口脚本（dist 单文件 / launcher），而非被 source 的模块文件
     current_script="$0"
     resolved_script="$(readlink -f "$current_script" 2>/dev/null || realpath "$current_script" 2>/dev/null || echo "$current_script")"
@@ -276,6 +277,15 @@ pve_tools_local_uninstall() {
     alias_rc_file="${alias_rc_file:-/root}/.bashrc"
     if [[ -n "${PVE_TOOLS_RC_FILE:-}" ]]; then
         alias_rc_file="$PVE_TOOLS_RC_FILE"
+    fi
+
+    # 标记块完整性前置校验（与入口安装器同一守卫语义）：任一标记缺失配对即拒绝自动清理，
+    # 防止范围删除波及文件尾部或残留孤儿标记
+    grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null && has_begin=1
+    grep -q "^# PVE-TOOLS END $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null && has_end=1
+    if [[ "$has_begin" -ne "$has_end" ]]; then
+        echo -e "${YELLOW}警告：${alias_rc_file} 中别名标记块不完整（缺 $([[ "$has_begin" -eq 1 ]] && echo "END" || echo "BEGIN") 标记），已拒绝自动清理，请手动检查该文件。${NC}" >&2
+        return 1
     fi
 
     [[ -f "$resolved_script" ]] && delete_targets+=("$resolved_script")
@@ -308,7 +318,7 @@ pve_tools_local_uninstall() {
     fi
 
     if (( ${#delete_targets[@]} == 0 && ${#deferred_targets[@]} == 0 )); then
-        if ! grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
+        if [[ "$has_begin" -eq 0 ]]; then
             log_warn "未发现可删除的 PVE-Tools 本地文件。"
             return 0
         fi
@@ -333,11 +343,19 @@ pve_tools_local_uninstall() {
     local target
     for target in "${delete_targets[@]}"; do
         if [[ -d "${target%/}" ]]; then
-            rm -rf -- "${target%/}"
-            echo -e "${GREEN}已删除目录:${NC} ${target%/}"
+            if rm -rf -- "${target%/}"; then
+                echo -e "${GREEN}已删除目录:${NC} ${target%/}"
+            else
+                echo -e "${RED}错误：目录删除失败:${NC} ${target%/}" >&2
+                cleanup_failed=1
+            fi
         elif [[ -e "$target" ]]; then
-            rm -f -- "$target"
-            echo -e "${GREEN}已删除文件:${NC} $target"
+            if rm -f -- "$target"; then
+                echo -e "${GREEN}已删除文件:${NC} $target"
+            else
+                echo -e "${RED}错误：文件删除失败:${NC} $target" >&2
+                cleanup_failed=1
+            fi
         fi
     done
 
