@@ -280,7 +280,12 @@ pve_tools_local_uninstall() {
     if [[ -f "$installed_bin" && "$installed_bin" != "$resolved_script" ]]; then
         delete_targets+=("$installed_bin")
     fi
-    if [[ -d "$installed_opt_dir" ]]; then
+    # 目录须包含本工具安装的完整版脚本才纳入递归删除清单（与入口安装器同一守卫规则；
+    # pve_tools_entry_is_full_script 仅存在于入口脚本，此处按相同规则就地校验），
+    # 避免元数据指向其他目录时被 rm -rf 误删无关文件
+    if [[ -d "$installed_opt_dir" ]] \
+        && [[ -f "$installed_opt_dir/PVE-Tools.sh" ]] \
+        && grep -q '^CURRENT_VERSION=' "$installed_opt_dir/PVE-Tools.sh" 2>/dev/null; then
         delete_targets+=("${installed_opt_dir}/")
     fi
     [[ -f "/var/log/pve-tools.log" ]] && delete_targets+=("/var/log/pve-tools.log")

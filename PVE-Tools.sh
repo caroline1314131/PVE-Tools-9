@@ -29,13 +29,21 @@ PVE_TOOLS_ENTRY_LAST_ERROR=""
 # 安装器配置：入口脚本不加载 lib/config.sh，以下默认值须与 lib/config.sh 中
 # PVE_TOOLS_BIN_PATH / PVE_TOOLS_OPT_DIR / PVE_TOOLS_ALIAS_MARKER / PVE_TOOLS_INSTALL_META_FILE
 # 保持一致。环境变量覆盖仅用于测试与自定义安装位置。
+# 显式覆盖须在应用默认值前登记来源：卸载端加载元数据时环境变量优先于元数据回填。
+PVE_TOOLS_INSTALL_BIN_PATH_FROM_ENV=0
+[[ -n "${PVE_TOOLS_INSTALL_BIN_PATH:-}" ]] && PVE_TOOLS_INSTALL_BIN_PATH_FROM_ENV=1
 PVE_TOOLS_INSTALL_BIN_PATH="${PVE_TOOLS_INSTALL_BIN_PATH:-/usr/local/bin/pvetools}"
+PVE_TOOLS_INSTALL_OPT_DIR_FROM_ENV=0
+[[ -n "${PVE_TOOLS_INSTALL_OPT_DIR:-}" ]] && PVE_TOOLS_INSTALL_OPT_DIR_FROM_ENV=1
 PVE_TOOLS_INSTALL_OPT_DIR="${PVE_TOOLS_INSTALL_OPT_DIR:-/opt/pve-tools}"
 # root 的 home 显式解析：sudo 下 $HOME 可能指向调用用户或未设置，
 # 须与卸载端 ${HOME:-/root} 的目标保持一致，避免别名写入/清理错位
+PVE_TOOLS_INSTALL_RC_FILE_FROM_ENV=0
 if [[ -z "${PVE_TOOLS_INSTALL_RC_FILE:-}" ]]; then
     PVE_TOOLS_INSTALL_RC_FILE="$(getent passwd root 2>/dev/null | cut -d: -f6)"
     PVE_TOOLS_INSTALL_RC_FILE="${PVE_TOOLS_INSTALL_RC_FILE:-/root}/.bashrc"
+else
+    PVE_TOOLS_INSTALL_RC_FILE_FROM_ENV=1
 fi
 # 元数据路径固定不可覆盖：保证任意自定义安装后，不带环境变量的卸载端总能定位到它
 PVE_TOOLS_INSTALL_META_FILE="/var/lib/pve-tools/installer.conf"
@@ -417,6 +425,15 @@ pve_tools_entry_write_alias_block() {
         return 1
     }
 
+    # 原子替换前保留原 RC 文件的属主与权限；原文件不存在时保持 mktemp 默认属性
+    if [[ -f "$rc_file" ]]; then
+        if ! chmod --reference="$rc_file" "$tmp_rc" || ! chown --reference="$rc_file" "$tmp_rc"; then
+            rm -f -- "$tmp_rc"
+            PVE_TOOLS_ENTRY_LAST_ERROR="无法保留原配置文件的权限与属主：$rc_file"
+            return 1
+        fi
+    fi
+
     if ! mv -f "$tmp_rc" "$rc_file"; then
         rm -f -- "$tmp_rc"
         PVE_TOOLS_ENTRY_LAST_ERROR="无法替换别名配置：$rc_file"
@@ -447,7 +464,8 @@ pve_tools_entry_remove_alias_block() {
         return 1
     }
     if sed "/^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$/,/^# PVE-TOOLS END $PVE_TOOLS_ALIAS_MARKER\$/d" "$rc_file" > "$tmp_rc"; then
-        if mv -f "$tmp_rc" "$rc_file"; then
+        # 替换前保留原 RC 文件的属主与权限（mktemp 默认 0600）
+        if chmod --reference="$rc_file" "$tmp_rc" && chown --reference="$rc_file" "$tmp_rc" && mv -f "$tmp_rc" "$rc_file"; then
             return 0
         fi
     fi
@@ -484,9 +502,21 @@ pve_tools_entry_load_install_meta() {
     [[ -r "$PVE_TOOLS_INSTALL_META_FILE" ]] || return 0
     while IFS='=' read -r key value; do
         case "$key" in
-            PVE_TOOLS_BIN_PATH) [[ -n "$value" ]] && PVE_TOOLS_INSTALL_BIN_PATH="$value" ;;
-            PVE_TOOLS_OPT_DIR)  [[ -n "$value" ]] && PVE_TOOLS_INSTALL_OPT_DIR="$value" ;;
-            PVE_TOOLS_RC_FILE)  [[ -n "$value" ]] && PVE_TOOLS_INSTALL_RC_FILE="$value" ;;
+            PVE_TOOLS_BIN_PATH)
+                if [[ -n "$value" && "$PVE_TOOLS_INSTALL_BIN_PATH_FROM_ENV" -eq 0 ]]; then
+                    PVE_TOOLS_INSTALL_BIN_PATH="$value"
+                fi
+                ;;
+            PVE_TOOLS_OPT_DIR)
+                if [[ -n "$value" && "$PVE_TOOLS_INSTALL_OPT_DIR_FROM_ENV" -eq 0 ]]; then
+                    PVE_TOOLS_INSTALL_OPT_DIR="$value"
+                fi
+                ;;
+            PVE_TOOLS_RC_FILE)
+                if [[ -n "$value" && "$PVE_TOOLS_INSTALL_RC_FILE_FROM_ENV" -eq 0 ]]; then
+                    PVE_TOOLS_INSTALL_RC_FILE="$value"
+                fi
+                ;;
         esac
     done < <(grep -E '^(PVE_TOOLS_BIN_PATH|PVE_TOOLS_OPT_DIR|PVE_TOOLS_RC_FILE)=' "$PVE_TOOLS_INSTALL_META_FILE")
 }
@@ -496,7 +526,8 @@ pve_tools_entry_load_install_meta() {
 pve_tools_entry_backup_existing() {
     local target="$1"
     local backup_dir="/var/backups/pve-tools"
-    local backup_path="${backup_dir}/$(basename "$target").bak"
+    local backup_path
+    backup_path="${backup_dir}/$(basename "$target").bak"
 
     [[ -f "$target" ]] || return 0
     mkdir -p "$backup_dir" || return 1
