@@ -264,13 +264,14 @@ pve_tools_local_uninstall() {
     echo -e "${YELLOW}不会删除 PVE 自身软件包、VM 磁盘或系统存储配置。${NC}"
     echo "$UI_DIVIDER"
 
-    # 安装器可能通过环境变量自定义了安装位置，元数据优先于默认常量
+    # 元数据优先于默认常量：先加载安装器元数据再快照实际安装路径，
+    # 否则 delete_targets 会拿到未解析的默认值，自定义位置的产物将无法被清理
+    pve_tools_load_installer_meta
     installed_bin="$PVE_TOOLS_BIN_PATH"
     installed_opt_dir="$PVE_TOOLS_OPT_DIR"
     # 元数据缺失时回退到 root 的 .bashrc（显式解析，与安装器默认值保持一致）
     alias_rc_file="$(getent passwd root 2>/dev/null | cut -d: -f6)"
     alias_rc_file="${alias_rc_file:-/root}/.bashrc"
-    pve_tools_load_installer_meta
     if [[ -n "${PVE_TOOLS_RC_FILE:-}" ]]; then
         alias_rc_file="$PVE_TOOLS_RC_FILE"
     fi

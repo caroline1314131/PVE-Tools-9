@@ -686,8 +686,8 @@ pve_tools_entry_install_from() {
 }
 
 pve_tools_entry_uninstall_system() {
-    local bin_path="" opt_dir="" rc_file=""
-    local has_bin=0 has_opt=0 has_alias=0 found=0
+    local bin_path="" opt_dir="" rc_file="" rc_backup=""
+    local has_bin=0 has_opt=0 has_alias=0 has_bak=0 found=0
     local answer=""
     local failures=0
 
@@ -713,6 +713,11 @@ pve_tools_entry_uninstall_system() {
     if grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$rc_file" 2>/dev/null; then
         has_alias=1; found=1
     fi
+    # 首次写入别名块前的配置备份（write_alias_block 创建）属于安装器产物，卸载时一并清理
+    rc_backup="${rc_file}.pve-tools-bak"
+    if [[ -f "$rc_backup" ]]; then
+        has_bak=1; found=1
+    fi
 
     if [[ "$found" -eq 0 ]]; then
         echo "未发现已安装的 pvetools，无需卸载。"
@@ -723,6 +728,7 @@ pve_tools_entry_uninstall_system() {
     [[ "$has_bin" -eq 1 ]] && echo "  - 命令文件：$bin_path"
     [[ "$has_opt" -eq 1 ]] && echo "  - 脚本目录：$opt_dir/"
     [[ "$has_alias" -eq 1 ]] && echo "  - 别名标记块：$rc_file"
+    [[ "$has_bak" -eq 1 ]] && echo "  - 首次安装前配置备份：$rc_backup"
 
     if ! read -r -p "确认卸载？输入 yes 继续，其他任意键取消: " answer; then
         answer=""
@@ -756,13 +762,26 @@ pve_tools_entry_uninstall_system() {
             failures=1
         fi
     fi
-
-    if [[ -f "$PVE_TOOLS_INSTALL_META_FILE" ]]; then
-        if rm -f -- "$PVE_TOOLS_INSTALL_META_FILE"; then
-            echo "已清理安装元数据：$PVE_TOOLS_INSTALL_META_FILE"
+    if [[ "$has_bak" -eq 1 ]]; then
+        if rm -f -- "$rc_backup"; then
+            echo "已删除：$rc_backup"
         else
-            echo "错误：无法删除安装元数据：$PVE_TOOLS_INSTALL_META_FILE" >&2
+            echo "错误：删除失败：$rc_backup" >&2
             failures=1
+        fi
+    fi
+
+    # 仅在全部清理成功后删除元数据；存在失败时保留，修复残留后重新卸载仍可定位自定义路径
+    if [[ -f "$PVE_TOOLS_INSTALL_META_FILE" ]]; then
+        if [[ "$failures" -eq 0 ]]; then
+            if rm -f -- "$PVE_TOOLS_INSTALL_META_FILE"; then
+                echo "已清理安装元数据：$PVE_TOOLS_INSTALL_META_FILE"
+            else
+                echo "错误：无法删除安装元数据：$PVE_TOOLS_INSTALL_META_FILE" >&2
+                failures=1
+            fi
+        else
+            echo "提示：已保留安装元数据 $PVE_TOOLS_INSTALL_META_FILE（存在未完成清理项，处理后重新运行卸载即可继续）。" >&2
         fi
     fi
 
