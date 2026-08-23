@@ -3,8 +3,8 @@
 # Copyright (C) 2026 Ciriu Networks
 
 # 版本信息
-CURRENT_VERSION="11.1.0"
-BUILD_NICKNAME="Liino"
+CURRENT_VERSION="11.2.0"
+BUILD_NICKNAME="Odette"
 VERSION_FILE_URL="https://raw.githubusercontent.com/PVE-Tools/PVE-Tools-9/main/VERSION"
 UPDATE_FILE_URL="https://raw.githubusercontent.com/PVE-Tools/PVE-Tools-9/main/UPDATE"
 # 自更新必须下载 Release 资产（构建产物单文件完整版）。
@@ -257,3 +257,11 @@ HOST_NETWORK_INTERFACES_FILE="/etc/network/interfaces"
 HOST_NETWORK_INTERFACES_STAGED_FILE="/etc/network/interfaces.new"
 HOST_NETWORK_EXPORT_DIR="/var/lib/pve-tools/network-firewall-exports"
 PVE_CLUSTER_FIREWALL_FILE="/etc/pve/firewall/cluster.fw"
+
+# 安装器路径约定（与入口 PVE-Tools.sh 中 PVE_TOOLS_INSTALL_* 默认值保持一致）
+# 入口脚本不加载本文件，两处常量需同步维护。
+PVE_TOOLS_BIN_PATH="/usr/local/bin/pvetools"
+PVE_TOOLS_OPT_DIR="/opt/pve-tools"
+PVE_TOOLS_ALIAS_MARKER="ALIAS"
+# 安装器元数据：记录实际安装路径（支持环境变量自定义），卸载逻辑优先读取
+PVE_TOOLS_INSTALL_META_FILE="/var/lib/pve-tools/installer.conf"
