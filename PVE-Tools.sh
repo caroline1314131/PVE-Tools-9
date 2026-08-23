@@ -762,12 +762,17 @@ pve_tools_entry_uninstall_system() {
             failures=1
         fi
     fi
+    # rc 备份是失败场景的恢复依据：仅在其余清理全部成功时删除，否则保留并提示
     if [[ "$has_bak" -eq 1 ]]; then
-        if rm -f -- "$rc_backup"; then
-            echo "已删除：$rc_backup"
+        if [[ "$failures" -eq 0 ]]; then
+            if rm -f -- "$rc_backup"; then
+                echo "已删除：$rc_backup"
+            else
+                echo "错误：删除失败：$rc_backup" >&2
+                failures=1
+            fi
         else
-            echo "错误：删除失败：$rc_backup" >&2
-            failures=1
+            echo "提示：已保留配置备份 $rc_backup（存在未完成清理项）。" >&2
         fi
     fi
 

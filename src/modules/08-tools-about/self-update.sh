@@ -252,7 +252,9 @@ pve_tools_load_installer_meta() {
 
 pve_tools_local_uninstall() {
     local current_script resolved_script clean_cron delete_targets=()
+    local deferred_targets=()
     local installed_bin installed_opt_dir alias_rc_file
+    local cleanup_failed=0
     # 用 $0 定位实际入口脚本（dist 单文件 / launcher），而非被 source 的模块文件
     current_script="$0"
     resolved_script="$(readlink -f "$current_script" 2>/dev/null || realpath "$current_script" 2>/dev/null || echo "$current_script")"
@@ -278,7 +280,10 @@ pve_tools_local_uninstall() {
 
     [[ -f "$resolved_script" ]] && delete_targets+=("$resolved_script")
     # 安装器产物联动清理：系统命令与 /opt 脚本副本目录（若当前正运行的就是它们则不重复收录）
-    if [[ -f "$installed_bin" && "$installed_bin" != "$resolved_script" ]]; then
+    # 命令文件须为本工具完整版才纳入删除（与下方 opt 目录同一守卫规则），避免误删占用该路径的其他程序
+    if [[ -f "$installed_bin" ]] \
+        && [[ "$installed_bin" != "$resolved_script" ]] \
+        && grep -q '^CURRENT_VERSION=' "$installed_bin" 2>/dev/null; then
         delete_targets+=("$installed_bin")
     fi
     # 目录须包含本工具安装的完整版脚本才纳入递归删除清单（与入口安装器同一守卫规则；
@@ -290,8 +295,9 @@ pve_tools_local_uninstall() {
         delete_targets+=("${installed_opt_dir}/")
     fi
     [[ -f "/var/log/pve-tools.log" ]] && delete_targets+=("/var/log/pve-tools.log")
-    [[ -d "/var/backups/pve-tools" ]] && delete_targets+=("/var/backups/pve-tools/")
-    [[ -d "/var/lib/pve-tools" ]] && delete_targets+=("/var/lib/pve-tools/")
+    # 备份与数据目录是清理失败时的恢复依据，延后到别名块等清理全部成功后再删除
+    [[ -d "/var/backups/pve-tools" ]] && deferred_targets+=("/var/backups/pve-tools/")
+    [[ -d "/var/lib/pve-tools" ]] && deferred_targets+=("/var/lib/pve-tools/")
 
     if [[ -f "$VM_BACKUP_CRON_FILE" ]]; then
         read -p "是否同时清理 VM 定时备份任务 ${VM_BACKUP_CRON_FILE}？(yes/no) [no]: " clean_cron
@@ -301,7 +307,7 @@ pve_tools_local_uninstall() {
         fi
     fi
 
-    if (( ${#delete_targets[@]} == 0 )); then
+    if (( ${#delete_targets[@]} == 0 && ${#deferred_targets[@]} == 0 )); then
         if ! grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
             log_warn "未发现可删除的 PVE-Tools 本地文件。"
             return 0
@@ -311,6 +317,9 @@ pve_tools_local_uninstall() {
     echo -e "${CYAN}将删除以下文件/目录:${NC}"
     if (( ${#delete_targets[@]} > 0 )); then
         printf '  - %s\n' "${delete_targets[@]}"
+    fi
+    if (( ${#deferred_targets[@]} > 0 )); then
+        printf '  - %s（别名标记块等清理成功后删除）\n' "${deferred_targets[@]}"
     fi
     if grep -q "^# PVE-TOOLS BEGIN $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
         echo -e "  - 别名标记块：${alias_rc_file}（# PVE-TOOLS BEGIN/END ${PVE_TOOLS_ALIAS_MARKER}）"
@@ -337,18 +346,43 @@ pve_tools_local_uninstall() {
         # （remove_block 内部不校验 END 标记，守卫必须先于此复用）
         if ! grep -q "^# PVE-TOOLS END $PVE_TOOLS_ALIAS_MARKER\$" "$alias_rc_file" 2>/dev/null; then
             echo -e "${YELLOW}警告：${alias_rc_file} 中别名标记块不完整（缺 END 标记），已跳过自动清理，请手动检查该文件。${NC}"
+            cleanup_failed=1
         elif ! backup_file "$alias_rc_file"; then
             echo -e "${YELLOW}警告：清理前备份 ${alias_rc_file} 失败，已跳过自动清理，请手动检查该文件。${NC}"
+            cleanup_failed=1
         elif remove_block "$alias_rc_file" "$PVE_TOOLS_ALIAS_MARKER"; then
             echo -e "${GREEN}已清理别名标记块:${NC} ${alias_rc_file}（清理前已备份至 /var/backups/pve-tools/）"
         else
             echo -e "${YELLOW}警告：清理 ${alias_rc_file} 别名标记块失败，请手动删除 # PVE-TOOLS BEGIN/END ${PVE_TOOLS_ALIAS_MARKER} 之间的内容。${NC}"
+            cleanup_failed=1
         fi
+    fi
+
+    # 备份与数据目录仅在全部清理成功后删除；失败时保留恢复依据并报告失败
+    if [[ "$cleanup_failed" -eq 1 ]]; then
+        echo -e "${RED}卸载未完全完成：已保留 /var/backups/pve-tools/ 与 /var/lib/pve-tools/，处理残留后可重新运行卸载。${NC}" >&2
+        return 1
+    fi
+    if (( ${#deferred_targets[@]} > 0 )); then
+        for target in "${deferred_targets[@]}"; do
+            if [[ -d "${target%/}" ]]; then
+                if rm -rf -- "${target%/}"; then
+                    echo -e "${GREEN}已删除目录:${NC} ${target%/}"
+                else
+                    echo -e "${RED}错误：目录删除失败:${NC} ${target%/}" >&2
+                    cleanup_failed=1
+                fi
+            fi
+        done
     fi
 
     if [[ "$clean_cron" == "yes" || "$clean_cron" == "YES" ]]; then
         systemctl restart cron 2>/dev/null || service cron restart 2>/dev/null || true
     fi
 
+    if [[ "$cleanup_failed" -eq 1 ]]; then
+        echo -e "${RED}卸载未完全完成，请根据上方提示处理残留项。${NC}" >&2
+        return 1
+    fi
     echo -e "${GREEN}卸载完成。当前脚本文件如已删除，本次会话结束后请直接退出。${NC}"
 }
